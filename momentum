@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -e
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$(command -v momentumd 2>/dev/null || true)"
+if [ -z "$BIN" ] && [ -x "$HOME/.cargo/bin/momentumd" ]; then
+    BIN="$HOME/.cargo/bin/momentumd"
+elif [ -z "$BIN" ] && [ -x "$DIR/target/release/momentumd" ]; then
+    BIN="$DIR/target/release/momentumd"
+fi
+
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo "Error: 'momentumd' executable not found on PATH." >&2
+    echo "Please build and install it: cargo build --release && cp target/release/momentumd ~/.cargo/bin/" >&2
+    exit 1
+fi
+
+case "$1" in
+    anc)
+        if [ -z "$2" ]; then
+            "$BIN" get-anc
+        elif [ "$2" = "cycle" ] || [ "$2" = "toggle" ]; then
+            "$BIN" cycle-anc
+        else
+            "$BIN" set-anc "$2"
+        fi
+        ;;
+    cycle-anc|cycle)
+        "$BIN" cycle-anc
+        ;;
+    transparency|aware)
+        if [ -z "$2" ]; then
+            "$BIN" get-transparency
+        else
+            "$BIN" set-transparency "$2"
+        fi
+        ;;
+    bass|bass-boost)
+        if [ -z "$2" ]; then
+            "$BIN" get-bass-boost
+        else
+            "$BIN" set-bass-boost "$2"
+        fi
+        ;;
+    battery|bat)
+        "$BIN" battery
+        ;;
+    status|info)
+        "$BIN" status
+        ;;
+    *)
+        "$BIN" "$@"
+        ;;
+esac

@@ -1,0 +1,15 @@
+[Unit]
+Description=Sennheiser Momentum Persistent Connection Daemon
+Documentation=https://github.com/Jazden/momentumd
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/momentumd
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
