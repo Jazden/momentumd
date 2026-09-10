@@ -118,6 +118,75 @@ pub async fn find_momentum_device(session: &Session) -> Result<Option<Device>> {
     Ok(None)
 }
 
+pub fn format_codec(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "aptx_hd" => "aptX HD".to_string(),
+        "aptx_adaptive" => "aptX Adaptive".to_string(),
+        "aptx_ll" => "aptX LL".to_string(),
+        "aptx" => "aptX".to_string(),
+        "ldac" => "LDAC".to_string(),
+        "aac" => "AAC".to_string(),
+        "sbc" => "SBC".to_string(),
+        "sbc_xq" => "SBC-XQ".to_string(),
+        "lc3" => "LC3".to_string(),
+        "opus" => "Opus".to_string(),
+        other => other.replace('_', " ").to_uppercase(),
+    }
+}
+
+pub fn detect_audio_codec(mac: &str) -> Option<String> {
+    if mac.is_empty() {
+        return None;
+    }
+    let mac_under = mac.replace(':', "_").to_lowercase();
+    let mac_colon = mac.to_lowercase();
+
+    // 1. Try pactl list sinks
+    if let Ok(output) = std::process::Command::new("pactl")
+        .args(["list", "sinks"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut current_sink_match = false;
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("Name:") {
+                    let lower = trimmed.to_lowercase();
+                    current_sink_match = lower.contains(&mac_under) || lower.contains(&mac_colon);
+                } else if current_sink_match && trimmed.contains("api.bluez5.codec") {
+                    if let Some(idx) = trimmed.find('=') {
+                        let val = trimmed[idx + 1..].trim().trim_matches('"');
+                        return Some(format_codec(val));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Try pw-dump fallback
+    if let Ok(output) = std::process::Command::new("pw-dump").output() {
+        if output.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(arr) = val.as_array() {
+                    for item in arr {
+                        let props = &item["info"]["props"];
+                        if let Some(addr) = props["api.bluez5.address"].as_str() {
+                            if addr.eq_ignore_ascii_case(mac) {
+                                if let Some(codec) = props["api.bluez5.codec"].as_str() {
+                                    return Some(format_codec(codec));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[allow(dead_code)]
 pub enum DeviceRequest {
     SetAnc(bool, tokio::sync::oneshot::Sender<Result<bool>>),
@@ -147,6 +216,7 @@ pub async fn run_bt_loop(
                 {
                     let mut c = cache.write().await;
                     c.device.connected = false;
+                    c.device.codec = None;
                     c.channel = None;
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -164,6 +234,7 @@ pub async fn run_bt_loop(
                 c.device.connected = false;
                 c.device.mac = addr.to_string();
                 c.device.name = name;
+                c.device.codec = None;
                 c.channel = None;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -234,12 +305,14 @@ pub async fn run_bt_loop(
             }
         }
 
+        let codec = detect_audio_codec(&addr.to_string());
         {
             let mut c = cache.write().await;
             c.device.connected = true;
             c.device.mac = addr.to_string();
             c.device.name = name.clone();
             c.device.battery = battery;
+            c.device.codec = codec;
             c.channel = connected_channel;
             c.last_updated = now_secs();
         }
@@ -253,12 +326,16 @@ pub async fn run_bt_loop(
         'active: loop {
             tokio::select! {
                 _ = poll_timer.tick() => {
-                    // Check BlueZ battery
-                    if let Ok(Some(bat)) = device.battery_percentage().await {
-                        let mut c = cache.write().await;
+                    // Check BlueZ battery & audio codec
+                    let bat_opt = device.battery_percentage().await.ok().flatten();
+                    let mut c = cache.write().await;
+                    if let Some(bat) = bat_opt {
                         c.device.battery = Some(bat);
-                        c.last_updated = now_secs();
                     }
+                    if c.device.codec.is_none() {
+                        c.device.codec = detect_audio_codec(&c.device.mac);
+                    }
+                    c.last_updated = now_secs();
                 }
 
                 req = req_rx.recv() => {
