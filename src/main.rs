@@ -58,6 +58,23 @@ enum Commands {
     },
     /// Get battery level
     Battery,
+    /// List paired devices and their connection states
+    Devices,
+    /// Connect or switch to a paired device by index or name
+    SwitchDevice {
+        #[arg(trailing_var_arg = true)]
+        device: Vec<String>,
+    },
+    /// Disconnect a paired device by index or name
+    DisconnectDevice {
+        #[arg(trailing_var_arg = true)]
+        device: Vec<String>,
+    },
+    /// Send raw GAIA command and display packet responses
+    Raw {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn get_socket_path(override_path: Option<PathBuf>) -> PathBuf {
@@ -186,6 +203,25 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Battery) => {
             run_client(sock_path, "battery".to_string()).await?;
+        }
+        Some(Commands::Devices) => {
+            run_client(sock_path, "devices".to_string()).await?;
+        }
+        Some(Commands::SwitchDevice { device }) => {
+            let target = device.join(" ");
+            run_client(sock_path, format!("switch-device {}", target)).await?;
+        }
+        Some(Commands::DisconnectDevice { device }) => {
+            let target = device.join(" ");
+            run_client(sock_path, format!("disconnect-device {}", target)).await?;
+        }
+        Some(Commands::Raw { args }) => {
+            let cmd_str = if args.is_empty() {
+                "raw".to_string()
+            } else {
+                format!("raw {}", args.join(" "))
+            };
+            run_client(sock_path, cmd_str).await?;
         }
     }
 

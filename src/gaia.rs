@@ -27,9 +27,16 @@ pub const CMD_GET_ANC_STATUS: u16 = 0x1A05;
 pub const CMD_SET_SIDETONE: u16 = 0x1A06;
 pub const CMD_GET_SIDETONE: u16 = 0x1A07;
 
+pub const CMD_GET_PAIRED_DEVICE_COUNT: u16 = 0x1400;
+pub const CMD_GET_PAIRED_DEVICE_INFO: u16 = 0x1401;
+pub const CMD_CONNECT_DEVICE: u16 = 0x1402;
+pub const CMD_DISCONNECT_DEVICE: u16 = 0x1403;
+pub const CMD_GET_DEVICE_CONNECTION_STATE: u16 = 0x1404;
+
 pub const FEATURE_USER_EQ: u8 = 8;
 pub const FEATURE_TRANSPARENCY: u8 = 12;
 pub const FEATURE_ANC: u8 = 13;
+pub const FEATURE_PAIRED_DEVICES: u8 = 20; // 0x14
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaiaPacket {

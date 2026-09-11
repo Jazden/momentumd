@@ -33,11 +33,19 @@ impl Default for AudioSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub index: u8,
+    pub name: String,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FullStatus {
     pub status: String,
     pub connected: bool,
     pub device: DeviceInfo,
     pub settings: AudioSettings,
+    pub paired_devices: Vec<PairedDevice>,
     pub channel: Option<u8>,
     pub timestamp: f64,
 }
@@ -45,6 +53,7 @@ pub struct FullStatus {
 pub struct StateCache {
     pub device: DeviceInfo,
     pub settings: AudioSettings,
+    pub paired_devices: Vec<PairedDevice>,
     pub channel: Option<u8>,
     pub last_updated: f64,
 }
@@ -60,6 +69,7 @@ impl StateCache {
                 codec: None,
             },
             settings: AudioSettings::default(),
+            paired_devices: Vec::new(),
             channel: None,
             last_updated: 0.0,
         }
@@ -71,6 +81,7 @@ impl StateCache {
             connected: self.device.connected,
             device: self.device.clone(),
             settings: self.settings.clone(),
+            paired_devices: self.paired_devices.clone(),
             channel: self.channel,
             timestamp: self.last_updated,
         }

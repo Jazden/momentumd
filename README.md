@@ -80,6 +80,21 @@ momentumd set-bass-boost off
 
 # Battery percentage
 momentumd battery
+
+# List paired devices and their connection status
+momentumd devices
+
+# Connect / switch to a paired device by index or name
+momentumd switch-device 1
+momentumd switch-device "Pixel"
+
+# Disconnect a paired device
+momentumd disconnect-device 1
+momentumd disconnect-device "Pixel"
+
+# Low-level GAIA protocol probing & debugging
+momentumd raw 1400
+momentumd raw 1401 00
 ```
 
 Using the `./momentum` wrapper:
@@ -89,6 +104,8 @@ Using the `./momentum` wrapper:
 ./momentum transparency 50
 ./momentum bass on
 ./momentum battery
+./momentum devices
+./momentum switch-device 1
 ```
 
 ---
@@ -100,12 +117,15 @@ The daemon listens on `${XDG_RUNTIME_DIR:-/tmp}/momentum.sock` (mode `0700`).
 ```bash
 # Line-based queries
 echo "status" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
+echo "devices" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
+echo "switch-device 1" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
 echo "set-anc active" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
 echo "set-transparency 50" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
 echo "cycle-anc" | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
 
 # JSON-based queries
 echo '{"cmd": "status"}' | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
+echo '{"cmd": "devices"}' | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
 ```
 
 ### Status Output Example
@@ -119,7 +139,7 @@ echo '{"cmd": "status"}' | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
     "name": "MOMENTUM 4",
     "connected": true,
     "battery": 100,
-    "codec": null
+    "codec": "aptX HD"
   },
   "settings": {
     "anc_enabled": true,
@@ -128,8 +148,20 @@ echo '{"cmd": "status"}' | nc -U "$XDG_RUNTIME_DIR/momentum.sock"
     "sidetone": 1,
     "wear_detection": true
   },
+  "paired_devices": [
+    {
+      "index": 0,
+      "name": "xps-arch",
+      "connected": true
+    },
+    {
+      "index": 1,
+      "name": "Jazden's Pixel 10 Pro X",
+      "connected": false
+    }
+  ],
   "channel": 2,
-  "timestamp": 1788972855.123
+  "timestamp": 1789160952.012
 }
 ```
 

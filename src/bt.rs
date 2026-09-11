@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::gaia::*;
-use crate::state::{now_secs, SharedCache};
+use crate::state::{now_secs, PairedDevice, SharedCache};
 
 pub const COMMON_CHANNELS: [u8; 4] = [2, 1, 14, 15];
 
@@ -92,6 +92,118 @@ impl GaiaClient {
         self.stream.write_all(&pkt.to_bytes()).await?;
         Ok(())
     }
+
+    pub async fn exchange_raw(
+        &mut self,
+        vendor: u16,
+        command: u16,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<GaiaPacket>> {
+        let pkt = GaiaPacket {
+            vendor,
+            command,
+            payload: payload.to_vec(),
+        };
+        self.stream.write_all(&pkt.to_bytes()).await?;
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut responses = Vec::new();
+
+        loop {
+            let (packets, consumed) = parse_packets(&self.buffer);
+            if consumed > 0 {
+                self.buffer.drain(0..consumed);
+            }
+
+            for p in packets {
+                let is_match = p.command == (command | 0x0100)
+                    || p.command == (command | 0x0180)
+                    || p.command == (command | 0x8000)
+                    || p.command == (command | 0x8100)
+                    || (p.command & 0x00FF) == (command & 0x00FF)
+                    || p.command == command;
+                if is_match {
+                    responses.push(p);
+                }
+            }
+
+            if !responses.is_empty() {
+                // Wait briefly (60ms) for any multi-part packets to arrive
+                let mut tmp = [0u8; 512];
+                if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(60), self.stream.read(&mut tmp)).await {
+                    if n > 0 {
+                        self.buffer.extend_from_slice(&tmp[..n]);
+                        let (more, c2) = parse_packets(&self.buffer);
+                        if c2 > 0 {
+                            self.buffer.drain(0..c2);
+                        }
+                        responses.extend(more);
+                    }
+                }
+                return Ok(responses);
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("timeout waiting for response to command {:#06x}", command));
+            }
+
+            let mut tmp = [0u8; 512];
+            tokio::select! {
+                res = self.stream.read(&mut tmp) => {
+                    let n = res?;
+                    if n == 0 {
+                        return Err(anyhow!("RFCOMM connection closed"));
+                    }
+                    self.buffer.extend_from_slice(&tmp[..n]);
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    return Err(anyhow!("timeout waiting for response to command {:#06x}", command));
+                }
+            }
+        }
+    }
+}
+
+pub async fn query_paired_devices(client: &mut GaiaClient) -> Result<Vec<PairedDevice>> {
+    let resp = client.exchange(CMD_GET_PAIRED_DEVICE_COUNT, &[], Duration::from_millis(1500)).await?;
+    let count = if resp.payload.len() >= 2 {
+        ((resp.payload[0] as usize) << 8) | (resp.payload[1] as usize)
+    } else if let Some(&c) = resp.payload.first() {
+        c as usize
+    } else {
+        0
+    };
+
+    let mut devices = Vec::new();
+    let check_limit = count.max(1).min(8);
+    for i in 0..check_limit {
+        if let Ok(entry) = client.exchange(CMD_GET_PAIRED_DEVICE_INFO, &[i as u8], Duration::from_millis(1000)).await {
+            let p = entry.payload;
+            if p.len() >= 3 && p[0] != 0xFF {
+                let idx = p[0];
+                let connected = p[2] != 0;
+                let name_bytes = if p.len() > 3 {
+                    let raw = &p[3..];
+                    if let Some(pos) = raw.iter().position(|&b| b == 0) {
+                        &raw[..pos]
+                    } else {
+                        raw
+                    }
+                } else {
+                    &[]
+                };
+                let name = String::from_utf8_lossy(name_bytes).trim().to_string();
+                devices.push(PairedDevice {
+                    index: idx,
+                    name,
+                    connected,
+                });
+            }
+        }
+    }
+    Ok(devices)
 }
 
 pub async fn find_momentum_device(session: &Session) -> Result<Option<Device>> {
@@ -194,6 +306,16 @@ pub enum DeviceRequest {
     SetBassBoost(bool, tokio::sync::oneshot::Sender<Result<bool>>),
     SetSidetone(u8, tokio::sync::oneshot::Sender<Result<u8>>),
     SetWearDetection(bool, tokio::sync::oneshot::Sender<Result<bool>>),
+    GetDevices(tokio::sync::oneshot::Sender<Result<Vec<PairedDevice>>>),
+    ConnectDevice(u8, tokio::sync::oneshot::Sender<Result<()>>),
+    DisconnectDevice(u8, tokio::sync::oneshot::Sender<Result<()>>),
+    Raw(
+        u16,
+        u16,
+        Vec<u8>,
+        Duration,
+        tokio::sync::oneshot::Sender<Result<Vec<GaiaPacket>>>,
+    ),
 }
 
 pub async fn run_bt_loop(
@@ -217,6 +339,7 @@ pub async fn run_bt_loop(
                     let mut c = cache.write().await;
                     c.device.connected = false;
                     c.device.codec = None;
+                    c.paired_devices.clear();
                     c.channel = None;
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -235,7 +358,21 @@ pub async fn run_bt_loop(
                 c.device.mac = addr.to_string();
                 c.device.name = name;
                 c.device.codec = None;
+                c.paired_devices.clear();
                 c.channel = None;
+            }
+            while let Ok(req) = req_rx.try_recv() {
+                match req {
+                    DeviceRequest::SetAnc(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::SetTransparency(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::SetBassBoost(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::SetSidetone(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::SetWearDetection(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::GetDevices(reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::ConnectDevice(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::DisconnectDevice(_, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                    DeviceRequest::Raw(_, _, _, _, reply) => { let _ = reply.send(Err(anyhow!("device not connected"))); }
+                }
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -281,7 +418,7 @@ pub async fn run_bt_loop(
         };
 
         // Step 3: Register notifications
-        for feat in [FEATURE_USER_EQ, FEATURE_TRANSPARENCY, FEATURE_ANC] {
+        for feat in [FEATURE_USER_EQ, FEATURE_TRANSPARENCY, FEATURE_ANC, FEATURE_PAIRED_DEVICES] {
             let _ = client.send(CMD_REGISTER_NOTIFICATION, &[feat]).await;
         }
 
@@ -305,6 +442,7 @@ pub async fn run_bt_loop(
             }
         }
 
+        let initial_devs = query_paired_devices(&mut client).await.unwrap_or_default();
         let codec = detect_audio_codec(&addr.to_string());
         {
             let mut c = cache.write().await;
@@ -313,6 +451,7 @@ pub async fn run_bt_loop(
             c.device.name = name.clone();
             c.device.battery = battery;
             c.device.codec = codec;
+            c.paired_devices = initial_devs;
             c.channel = connected_channel;
             c.last_updated = now_secs();
         }
@@ -328,14 +467,29 @@ pub async fn run_bt_loop(
                 _ = poll_timer.tick() => {
                     // Check BlueZ battery & audio codec
                     let bat_opt = device.battery_percentage().await.ok().flatten();
-                    let mut c = cache.write().await;
-                    if let Some(bat) = bat_opt {
-                        c.device.battery = Some(bat);
+                    let codec_opt = detect_audio_codec(&addr.to_string());
+                    let devs_res = query_paired_devices(&mut client).await;
+
+                    match devs_res {
+                        Ok(devs) => {
+                            let mut c = cache.write().await;
+                            if let Some(bat) = bat_opt {
+                                c.device.battery = Some(bat);
+                            }
+                            if codec_opt.is_some() {
+                                c.device.codec = codec_opt;
+                            }
+                            c.paired_devices = devs;
+                            c.last_updated = now_secs();
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("os error") || err_str.contains("closed") || err_str.contains("Broken pipe") {
+                                tracing::warn!("Periodic poll connection error: {}, disconnecting", e);
+                                break 'active;
+                            }
+                        }
                     }
-                    if c.device.codec.is_none() {
-                        c.device.codec = detect_audio_codec(&c.device.mac);
-                    }
-                    c.last_updated = now_secs();
                 }
 
                 req = req_rx.recv() => {
@@ -429,6 +583,67 @@ pub async fn run_bt_loop(
                                 }
                             }
                         }
+                        Some(DeviceRequest::GetDevices(reply)) => {
+                            let res = query_paired_devices(&mut client).await;
+                            match res {
+                                Ok(devs) => {
+                                    {
+                                        let mut c = cache.write().await;
+                                        c.paired_devices = devs.clone();
+                                        c.last_updated = now_secs();
+                                    }
+                                    let _ = reply.send(Ok(devs));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(anyhow!("{}", e)));
+                                    break 'active;
+                                }
+                            }
+                        }
+                        Some(DeviceRequest::ConnectDevice(idx, reply)) => {
+                            let res = client.exchange(CMD_CONNECT_DEVICE, &[idx], Duration::from_millis(2000)).await;
+                            match res {
+                                Ok(_) => {
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    if let Ok(devs) = query_paired_devices(&mut client).await {
+                                        let mut c = cache.write().await;
+                                        c.paired_devices = devs;
+                                        c.last_updated = now_secs();
+                                    }
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e));
+                                    break 'active;
+                                }
+                            }
+                        }
+                        Some(DeviceRequest::DisconnectDevice(idx, reply)) => {
+                            let res = client.exchange(CMD_DISCONNECT_DEVICE, &[idx], Duration::from_millis(2000)).await;
+                            match res {
+                                Ok(_) => {
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    if let Ok(devs) = query_paired_devices(&mut client).await {
+                                        let mut c = cache.write().await;
+                                        c.paired_devices = devs;
+                                        c.last_updated = now_secs();
+                                    }
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e));
+                                    break 'active;
+                                }
+                            }
+                        }
+                        Some(DeviceRequest::Raw(vendor, command, payload, timeout, reply)) => {
+                            let res = client.exchange_raw(vendor, command, &payload, timeout).await;
+                            let is_disconnect = res.is_err();
+                            let _ = reply.send(res);
+                            if is_disconnect {
+                                break 'active;
+                            }
+                        }
                         None => break 'active,
                     }
                 }
@@ -456,6 +671,12 @@ pub async fn run_bt_loop(
                                         c.settings.bass_boost = val != 0;
                                         c.last_updated = now_secs();
                                     }
+                                } else if p.command == 0x1B14 || p.command == 0x1501 || p.command == 0x1504 {
+                                    if let Ok(devs) = query_paired_devices(&mut client).await {
+                                        let mut c = cache.write().await;
+                                        c.paired_devices = devs;
+                                        c.last_updated = now_secs();
+                                    }
                                 }
                             }
                         }
@@ -471,6 +692,7 @@ pub async fn run_bt_loop(
         {
             let mut c = cache.write().await;
             c.device.connected = false;
+            c.paired_devices.clear();
             c.channel = None;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
