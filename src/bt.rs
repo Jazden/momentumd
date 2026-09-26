@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::gaia::*;
 use crate::state::{now_secs, PairedDevice, SharedCache};
 
-pub const COMMON_CHANNELS: [u8; 4] = [2, 1, 14, 15];
+pub const COMMON_CHANNELS: [u8; 6] = [2, 1, 14, 15, 11, 12];
 
 pub struct GaiaClient {
     stream: Stream,
